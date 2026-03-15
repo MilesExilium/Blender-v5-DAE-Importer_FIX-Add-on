@@ -1,6 +1,7 @@
 bl_info = {
     "name": "Simple COLLADA (.dae) Importer (Positions + Normals + Colors + UVs)",
     "author": "ekztal",
+    "additional help": "MilesExilium",
     "version": (1, 0, 1),
     "blender": (4, 0, 0),
     "location": "File > Import > Simple COLLADA (.dae)",
