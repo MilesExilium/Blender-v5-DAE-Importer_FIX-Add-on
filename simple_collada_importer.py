@@ -1,11 +1,10 @@
 bl_info = {
-    "name": "Simple COLLADA (.dae) Importer (Positions + Normals + Colors + UVs + Textures + Rig)",
+    "name": "Simple COLLADA (.dae) Importer (Positions + Normals + Colors + UVs)",
     "author": "ekztal",
-    "additional help": "MilesExilium",
-    "version": (0, 9, 6),
+    "version": (1, 0, 1),
     "blender": (4, 0, 0),
     "location": "File > Import > Simple COLLADA (.dae)",
-    "description": "Imports COLLADA meshes with textures, armature, and skin weights.",
+    "description": "Imports COLLADA meshes with POSITION/NORMAL/COLOR/TEXCOORD, textures, armature, and skin weights.",
     "category": "Import-Export",
     "support": "COMMUNITY",
 }
@@ -86,6 +85,68 @@ def get_up_axis_matrix(root, ns):
         return Matrix.Rotation(-math.pi / 2.0, 4, 'Y')
     else:   # Y_UP
         return Matrix.Rotation(math.pi / 2.0, 4, 'X')
+
+
+def analyse_dae(root, ns):
+    """
+    Profile a parsed DAE file and return an ImportProfile dict describing
+    everything the importer needs to know before touching any geometry.
+
+    Keys:
+      is_rigged       — file has joints + skin controllers
+      is_assembly     — file uses library_nodes / instance_node (e.g. Bricklink)
+      up_axis         — 'Z_UP', 'Y_UP', or 'X_UP'
+      unit_meter      — float scale factor from <asset><unit meter="...">
+      joint_count     — number of JOINT nodes
+      controller_count— number of skin controllers
+      has_lib_nodes   — <library_nodes> present
+      has_inst_nodes  — <instance_node> elements present
+      has_anims       — <library_animations> present and non-empty
+    """
+    asset = root.find(q(ns, "asset"))
+
+    # Up axis
+    up_elem = asset.find(q(ns, "up_axis")) if asset is not None else None
+    up_axis = up_elem.text.strip().upper() if (up_elem is not None and up_elem.text) else "Z_UP"
+
+    # Unit scale
+    unit_elem = asset.find(q(ns, "unit")) if asset is not None else None
+    unit_meter = float(unit_elem.attrib.get("meter", 1.0)) if unit_elem is not None else 1.0
+
+    # Rig
+    joint_nodes  = root.findall(f".//{q(ns,'node')}[@type='JOINT']")
+    ctrl_lib     = root.find(q(ns, "library_controllers"))
+    ctrl_list    = list(ctrl_lib) if ctrl_lib is not None else []
+    # Count only skin controllers (not morph)
+    skin_ctrls   = [c for c in ctrl_list if c.find(q(ns,"skin")) is not None]
+    is_rigged    = len(joint_nodes) > 0 and len(skin_ctrls) > 0
+
+    # Assembly
+    has_lib_nodes  = root.find(q(ns, "library_nodes")) is not None
+    has_inst_nodes = bool(root.findall(f".//{q(ns,'instance_node')}"))
+    is_assembly    = has_inst_nodes or (has_lib_nodes and not is_rigged)
+
+    # Animations
+    anim_lib  = root.find(q(ns, "library_animations"))
+    has_anims = anim_lib is not None and len(list(anim_lib)) > 0
+
+    profile = {
+        "is_rigged":        is_rigged,
+        "is_assembly":      is_assembly,
+        "up_axis":          up_axis,
+        "unit_meter":       unit_meter,
+        "joint_count":      len(joint_nodes),
+        "controller_count": len(skin_ctrls),
+        "has_lib_nodes":    has_lib_nodes,
+        "has_inst_nodes":   has_inst_nodes,
+        "has_anims":        has_anims,
+    }
+
+    print(f"[DAE Profile] rigged={is_rigged} assembly={is_assembly} "
+          f"up={up_axis} unit={unit_meter} "
+          f"joints={len(joint_nodes)} ctrls={len(skin_ctrls)} "
+          f"anims={has_anims}")
+    return profile
 
 
 # ---------------------- MATERIAL / TEXTURE HELPERS ----------------------
@@ -285,7 +346,7 @@ def build_armature(root, ns, collection, model_name="Armature", correction_mat=N
     """
     vs = root.find(f".//{q(ns,'visual_scene')}")
     if vs is None:
-        return None, {}
+        return None
 
     # --- Collect inv_bind matrices from all skin controllers ---
     # joint_id -> 4x4 Matrix (bind-pose world transform = inv of inv_bind)
@@ -326,24 +387,53 @@ def build_armature(root, ns, collection, model_name="Armature", correction_mat=N
 
             jnames     = sources.get(jnames_src, [])
             ibm_floats = sources.get(ibm_src, [])
+
+            # Detect scale embedded in inv_bind column
+            ibm_col_scale = 1.0
+            if len(ibm_floats) >= 9:
+                import math as _math
+                ibm_col_scale = _math.sqrt(
+                    ibm_floats[0]**2 + ibm_floats[4]**2 + ibm_floats[8]**2
+                )
+                if abs(ibm_col_scale - 1.0) < 0.001:
+                    ibm_col_scale = 1.0
+
             for i, jname in enumerate(jnames):
                 if jname in joint_bind_world:
-                    continue  # already have it from another controller
+                    continue
                 start = i * 16
                 if start + 16 > len(ibm_floats):
                     continue
-                inv_bind = Matrix([ ibm_floats[start:start+4],
-                                    ibm_floats[start+4:start+8],
-                                    ibm_floats[start+8:start+12],
-                                    ibm_floats[start+12:start+16] ])
-                # bind_world = inverse of inv_bind = bone's world transform at bind pose
-                try:
-                    joint_bind_world[jname] = inv_bind.inverted()
-                except Exception:
-                    joint_bind_world[jname] = Matrix.Identity(4)
+                m = ibm_floats[start:start+16]
+
+                if abs(ibm_col_scale - 1.0) > 0.001:
+                    # When inv_bind has embedded scale s, the correct bone world
+                    # position is: pos = -(1/s²) * R^T * translation_col
+                    # where R is the normalised rotation (inv_bind / s)
+                    s = ibm_col_scale
+                    tx, ty, tz = m[3], m[7], m[11]
+                    # R^T rows (= R columns normalised)
+                    r00,r01,r02 = m[0]/s, m[4]/s, m[8]/s
+                    r10,r11,r12 = m[1]/s, m[5]/s, m[9]/s
+                    r20,r21,r22 = m[2]/s, m[6]/s, m[10]/s
+                    bx = -(r00*tx + r01*ty + r02*tz) / s
+                    by = -(r10*tx + r11*ty + r12*tz) / s
+                    bz = -(r20*tx + r21*ty + r22*tz) / s
+                    # Build a world matrix with corrected position
+                    world = Matrix.Identity(4)
+                    world.translation = Vector((bx, by, bz))
+                    joint_bind_world[jname] = world
+                else:
+                    inv_bind = Matrix([
+                        m[0:4], m[4:8], m[8:12], m[12:16]
+                    ])
+                    try:
+                        joint_bind_world[jname] = inv_bind.inverted()
+                    except Exception:
+                        joint_bind_world[jname] = Matrix.Identity(4)
 
     if not joint_bind_world:
-        return None, {}
+        return None
 
     # --- Walk visual scene to get bone hierarchy and names ---
     # bone_info keyed by node_id; we also build a name->id reverse map
@@ -422,11 +512,14 @@ def build_armature(root, ns, collection, model_name="Armature", correction_mat=N
     # Store the resolve function result in a module-level accessible way via closure
     _resolve_skin_ref = resolve_skin_ref
 
-    # Create Armature object at identity
+    # Create Armature object at identity.
+    # The Armature modifier handles the mesh<->bone transform relationship
+    # internally via the inv_bind matrices — no manual transform needed here.
     arm_data = bpy.data.armatures.new(model_name)
     arm_data.display_type = 'OCTAHEDRAL'
     arm_obj  = bpy.data.objects.new(model_name, arm_data)
     collection.objects.link(arm_obj)
+    # arm_obj.matrix_world stays at identity
 
     bpy.context.view_layer.objects.active = arm_obj
     bpy.ops.object.mode_set(mode='EDIT')
@@ -474,7 +567,7 @@ def build_armature(root, ns, collection, model_name="Armature", correction_mat=N
 
     bpy.ops.object.mode_set(mode='OBJECT')
     print(f"Armature '{model_name}' created with {len(created)} bones.")
-    return arm_obj, joint_bsm
+    return arm_obj
 
 
 # ---------------------- SKIN WEIGHT PARSER ----------------------
@@ -574,13 +667,39 @@ def parse_controllers(root, ns):
                             cursor += num_inputs
                         vertex_weights[vert_idx] = pairs
 
+        # Detect scale embedded in inv_bind and extract rotation matrix
+        ibm_col_scale = 1.0
+        ibm_R = None
+        joints_elem2 = skin.find(q(ns, "joints"))
+        if joints_elem2 is not None:
+            ibm_src_id = None
+            for inp in joints_elem2.findall(q(ns, "input")):
+                if inp.attrib.get("semantic") == "INV_BIND_MATRIX":
+                    ibm_src_id = inp.attrib.get("source","")[1:]
+            if ibm_src_id and ibm_src_id in sources:
+                ibm_f = sources[ibm_src_id]
+                if len(ibm_f) >= 9:
+                    import math as _math
+                    ibm_col_scale = round(_math.sqrt(
+                        ibm_f[0]**2 + ibm_f[4]**2 + ibm_f[8]**2
+                    ), 4)
+                    if abs(ibm_col_scale - 1.0) < 0.001:
+                        ibm_col_scale = 1.0
+                    elif len(ibm_f) >= 16:
+                        s = ibm_col_scale
+                        ibm_R = Matrix([
+                            [ibm_f[0]/s, ibm_f[1]/s, ibm_f[2]/s],
+                            [ibm_f[4]/s, ibm_f[5]/s, ibm_f[6]/s],
+                            [ibm_f[8]/s, ibm_f[9]/s, ibm_f[10]/s],
+                        ])
+
         result[ctrl_id] = {
             "skin_source":        skin_source,
-            # Normalise spaces to underscores so vertex group names match bone names
-            # regardless of whether the exporter used spaces or underscores
             "joint_names":        [n.replace(" ", "_") for n in joint_names],
             "vertex_weights":     vertex_weights,
             "bind_shape_matrix":  bind_shape_matrix,
+            "inv_bind_col_scale": ibm_col_scale,
+            "inv_bind_R":         ibm_R,
         }
 
     return result
@@ -610,7 +729,6 @@ def build_ctrl_mat_map(root, ns, controllers):
 
 def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
                               arm_obj, controllers, ctrl_mat_override, dae_filepath,
-                              armature_node_mat=None,
                               import_uvs=True, import_normals=True,
                               import_vertex_colors=True, merge_vertices=False,
                               merge_threshold=0.0001):
@@ -683,17 +801,27 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
         tri_mat_symbol = prim.attrib.get("material")
         tri_mat_id     = ctrl_mat_override.get(tri_mat_symbol, tri_mat_symbol)
 
-        input_by_offset = {}
-        max_offset      = 0
+        # Collect all inputs as a list first — multiple semantics can share
+        # the same offset (e.g. VERTEX and NORMAL both at 0 when normals are
+        # per-vertex). Build the offset dict giving VERTEX priority so it is
+        # never overwritten by a same-offset NORMAL.
+        all_inputs = []
+        max_offset = 0
         for inp in prim.findall(q(ns, "input")):
             sem   = inp.attrib.get("semantic")
             src   = inp.attrib.get("source", "")[1:]
             off   = int(inp.attrib.get("offset", "0"))
             set_i = inp.attrib.get("set")
-            input_by_offset[off] = (sem, src, set_i)
+            all_inputs.append((sem, src, off, set_i))
             max_offset = max(max_offset, off)
 
         num_inputs = max_offset + 1
+
+        # Build offset->input dict, giving VERTEX priority at any given offset
+        input_by_offset = {}
+        for sem, src, off, set_i in all_inputs:
+            if off not in input_by_offset or sem == "VERTEX":
+                input_by_offset[off] = (sem, src, set_i)
 
         vertex_offset = pos_source_id = None
         vertex_src_id = None  # the vertices block id (for fallback lookups)
@@ -799,16 +927,31 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
         return None
 
     # ---------------------- CREATE MESH ----------------------
-    # Mesh vertices only need the bind_shape_matrix applied.
-    # Bones are computed as armature_node_mat @ joint_chain.
-    # BSM brings vertices into the same space bones expect — do NOT also apply armature_node_mat.
     skin_ctrl = next((c for c in controllers.values() if c["skin_source"] == geom_id), None)
+
+    # Apply bind_shape_matrix to vertices
     if skin_ctrl is not None:
         bsm = skin_ctrl.get("bind_shape_matrix", Matrix.Identity(4))
         if bsm != Matrix.Identity(4):
             bsm3 = bsm.to_3x3()
             bsm_t = bsm.to_translation()
             positions = [tuple(bsm3 @ Vector(p) + bsm_t) for p in positions]
+
+        # When inv_bind has embedded scale (e.g. 100 for cm->m), the skeleton
+        # expects vertices in scaled+rotated space. Apply the same transform:
+        # divide by scale, then apply the rotation encoded in the inv_bind matrix.
+        # The rotation is extracted from the first inv_bind and matches what
+        # build_armature uses when computing bone positions.
+        ibm_col_scale = skin_ctrl.get("inv_bind_col_scale", 1.0)
+        if abs(ibm_col_scale - 1.0) > 0.001:
+            s = ibm_col_scale
+            # Rotation from first inv_bind: R = ibm[:3x3] / scale
+            # Apply R * (v / s) to each vertex
+            ibm_R = skin_ctrl.get("inv_bind_R", None)
+            if ibm_R is not None:
+                positions = [tuple(ibm_R @ (Vector(p) * (1.0/s))) for p in positions]
+            else:
+                positions = [tuple(x / s for x in p) for p in positions]
 
     mesh = bpy.data.meshes.new(geom_name)
     mesh.from_pydata([Vector(p) for p in positions], [], faces)
@@ -885,9 +1028,8 @@ def build_mesh_from_geometry(geom_elem, ns, collection, material_texture_map,
         bsdf_n = nodes.new("ShaderNodeBsdfPrincipled"); bsdf_n.location = (300, 0)
         links.new(bsdf_n.outputs["BSDF"], out_n.inputs["Surface"])
 
-        # Roughness from phong shininess (shininess=50 → roughness~0.65)
-        roughness = channels.get("_roughness", 0.8)
-        bsdf_n.inputs["Roughness"].default_value = roughness
+        # Roughness always 1.0 — avoids oily/shiny appearance on imported models
+        bsdf_n.inputs["Roughness"].default_value = 1.0
 
         # Specular: read from DAE specular color; default very low for skin/cloth
         spec_color = channels.get("_spec_color")
@@ -1109,6 +1251,9 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
     )
 
     def execute(self, context):
+        # Pre-scan the file to auto-configure import settings
+        self._prescan()
+
         if not os.path.isfile(self.filepath):
             self.report({'ERROR'}, f"File not found: {self.filepath}")
             return {'CANCELLED'}
@@ -1117,16 +1262,14 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
             tree = ET.parse(self.filepath)
             root = tree.getroot()
         except ET.ParseError as e:
-            # Some exporters (e.g. Bricklink Studio) write namespace prefixes like
-            # xsi:type without declaring the xmlns:xsi binding, which causes
-            # "unbound prefix" errors. Strip all namespace declarations and retry.
             try:
                 import re
                 with open(self.filepath, 'r', encoding='utf-8', errors='replace') as f:
                     raw = f.read()
-                # Remove undeclared namespace prefixes from tags and attributes
-                raw = re.sub(r'<(\w+):(\w)', r'<\2', raw)
-                raw = re.sub(r'</(\w+):(\w)', r'</\2', raw)
+                raw = re.sub(r'<\w+:\w+[^>]*/>', '', raw)
+                raw = re.sub(r'<(\w+:\w+)[^>]*>.*?</\1>', '', raw, flags=re.DOTALL)
+                raw = re.sub(r'<(\w+):(\w+)', r'<\2', raw)
+                raw = re.sub(r'</(\w+):(\w+)', r'</\2', raw)
                 raw = re.sub(r'\s+\w+:\w+\s*=\s*"[^"]*"', '', raw)
                 raw = re.sub(r"\s+\w+:\w+\s*=\s*'[^']*'", '', raw)
                 root = ET.fromstring(raw)
@@ -1145,19 +1288,55 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
         else:
             collection = context.scene.collection
 
-        material_texture_map = extract_material_texture_map(root, ns) if self.import_materials else {}
-
-        model_name    = os.path.splitext(os.path.basename(dae))[0]
+        # ── Profile the file — all import decisions flow from this ──────────
+        profile        = analyse_dae(root, ns)
+        is_rigged      = profile["is_rigged"]
+        is_assembly    = profile["is_assembly"]
         correction_mat = get_up_axis_matrix(root, ns)
+        # ────────────────────────────────────────────────────────────────────
 
-        arm_obj           = None
-        armature_node_mat = Matrix.Identity(4)
-        controllers       = {}
-        if self.import_rig:
-            arm_obj, armature_node_mat = build_armature(root, ns, collection, model_name, correction_mat)
+        material_texture_map = extract_material_texture_map(root, ns) if self.import_materials else {}
+        model_name           = os.path.splitext(os.path.basename(dae))[0]
+
+        arm_obj     = None
+        controllers = {}
+        if self.import_rig and is_rigged:
+            arm_obj = build_armature(root, ns, collection, model_name, correction_mat)
             controllers = parse_controllers(root, ns)
+        elif self.import_rig and not is_rigged:
+            print("[DAE Profile] No rig found — skipping armature import.")
+
+
 
         geom_mat_override = build_ctrl_mat_map(root, ns, controllers)
+
+        # Build geometry_id -> world Matrix map for assembly-style files only
+        geom_world_mat = {}
+        if is_assembly:
+            def _node_mat(node):
+                m = node.find(q(ns, "matrix"))
+                return parse_matrix(m.text) if (m is not None and m.text) else Matrix.Identity(4)
+
+            def _walk(node, parent_mat):
+                world = parent_mat @ _node_mat(node)
+                ig = node.find(q(ns, "instance_geometry"))
+                if ig is not None:
+                    gid = ig.attrib.get("url","")[1:]
+                    geom_world_mat.setdefault(gid, world)
+                for inn in node.findall(q(ns, "instance_node")):
+                    nid = inn.attrib.get("url","").lstrip("#")
+                    lib = root.find(q(ns, "library_nodes"))
+                    if lib is not None:
+                        tgt = lib.find(f".//{q(ns,'node')}[@id='{nid}']")
+                        if tgt is not None:
+                            _walk(tgt, world)
+                for child in node.findall(q(ns, "node")):
+                    _walk(child, world)
+
+            vs = root.find(f".//{q(ns,'visual_scene')}")
+            if vs is not None:
+                for node in vs.findall(q(ns, "node")):
+                    _walk(node, Matrix.Identity(4))
 
         geometries = root.findall(f".//{q(ns,'geometry')}")
         if not geometries:
@@ -1170,7 +1349,7 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
             mat_override = geom_mat_override.get(geom_id, {})
             obj = build_mesh_from_geometry(
                 geom, ns, collection, material_texture_map,
-                arm_obj, controllers, mat_override, dae, armature_node_mat,
+                arm_obj, controllers, mat_override, dae,
                 import_uvs=self.import_uvs,
                 import_normals=self.import_normals,
                 import_vertex_colors=self.import_vertex_colors,
@@ -1178,6 +1357,10 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
                 merge_threshold=self.merge_threshold,
             )
             if obj:
+                if geom_id in geom_world_mat:
+                    # Assembly-style: use per-part node transform
+                    obj.matrix_world = geom_world_mat[geom_id]
+
                 imported += 1
 
         if imported == 0:
@@ -1188,8 +1371,68 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
         self.report({'INFO'}, f"Imported {imported} object(s){rig_msg}.")
         return {'FINISHED'}
 
+    def invoke(self, context, event):
+        # Let Blender open the file browser first, then we'll pre-scan on execute.
+        # We use the standard ImportHelper invoke which opens the file selector.
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _prescan(self):
+        """
+        Quick pre-scan of the selected file to set sensible defaults.
+        Called at the start of execute() before any heavy processing.
+        """
+        if not self.filepath or not os.path.isfile(self.filepath):
+            return
+        try:
+            import re as _re
+            try:
+                _tree = ET.parse(self.filepath)
+                _root = _tree.getroot()
+            except ET.ParseError:
+                with open(self.filepath, 'r', encoding='utf-8', errors='replace') as f:
+                    _raw = f.read()
+                _raw = _re.sub(r'<(\w+:\w+)[^>]*>.*?</\1>', '', _raw, flags=_re.DOTALL)
+                _raw = _re.sub(r'<(\w+):(\w+)', r'<\2', _raw)
+                _raw = _re.sub(r'</(\w+):(\w+)', r'</\2', _raw)
+                _root = ET.fromstring(_raw)
+
+            _ns = get_collada_ns(_root)
+            _profile = analyse_dae(_root, _ns)
+
+            # Auto-set import_rig based on whether file actually has a rig
+            self.import_rig = _profile["is_rigged"]
+
+            # Auto-set import_materials based on whether file has images
+            _img_lib = _root.find(f"{_ns}library_images" if _ns else "library_images")
+            has_images = _img_lib is not None and len(list(_img_lib)) > 0
+            self.import_materials = has_images
+
+            # Store profile summary for display in draw()
+            self._profile_summary = (
+                f"Joints: {_profile['joint_count']}  "
+                f"Controllers: {_profile['controller_count']}  "
+                f"Up: {_profile['up_axis']}  "
+                f"Unit: {_profile['unit_meter']}m  "
+                f"Assembly: {_profile['is_assembly']}  "
+                f"Anims: {_profile['has_anims']}"
+            )
+        except Exception as e:
+            print(f"[DAE pre-scan failed: {e}]")
+
     def draw(self, context):
         layout = self.layout
+        # Show detected file profile if available
+        if hasattr(self, '_profile_summary'):
+            box = layout.box()
+            box.label(text="Detected:", icon='INFO')
+            # Split across two lines if needed
+            parts = self._profile_summary.split("  ")
+            row1 = "  ".join(parts[:3])
+            row2 = "  ".join(parts[3:])
+            box.label(text=row1)
+            box.label(text=row2)
+            layout.separator()
         layout.label(text="Mesh")
         layout.prop(self, "import_uvs")
         layout.prop(self, "import_normals")
