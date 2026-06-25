@@ -1116,7 +1116,26 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
                     if obj:
                         obj.matrix_world = world_mat
                         imported += 1
-
+            for ic in node.findall(q(ns, "instance_controller")):
+                ctrl_url_val = ic.attrib.get("url", "")
+                ctrl_url = ctrl_url_val.lstrip("#")
+                if ctrl_url in controllers:
+                    geom_id = controllers[ctrl_url]["skin_source"]
+                    if geom_id in geom_map and geom_id not in imported_geom_ids:
+                        imported_geom_ids.add(geom_id)
+                        mat_override = geom_mat_override.get(geom_id, {})
+                        obj = build_mesh_from_geometry(
+                            geom_map[geom_id], ns, collection, material_texture_map,
+                            arm_obj, controllers, mat_override, dae,
+                            import_uvs=self.import_uvs,
+                            import_normals=self.import_normals,
+                            import_vertex_colors=self.import_vertex_colors,
+                            merge_vertices=self.merge_vertices,
+                            merge_threshold=self.merge_threshold,
+                        )
+                        if obj:
+                            obj.matrix_world = local_mat
+                            imported += 1
             # Instance node (library_nodes assembly)
             for inn in node.findall(q(ns, "instance_node")):
                 nid_val = inn.attrib.get("url", "")
