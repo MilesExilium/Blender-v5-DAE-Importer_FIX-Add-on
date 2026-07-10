@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Simple COLLADA (.dae) Importer",
-    "author": "ekztal / MilesExilium / RebeccaNod1",
+    "author": "ekztal / MilesExilium / RebeccaNod1 / Zack Wilde",
     "version": (3, 4, 0),
     "blender": (4, 0, 0),
     "location": "File > Import > Simple COLLADA (.dae)",
@@ -14,7 +14,7 @@ import math
 import bpy
 from bpy_extras.io_utils import ImportHelper
 from bpy.types import Operator
-from bpy.props import StringProperty, BoolProperty, FloatProperty
+from bpy.props import StringProperty, BoolProperty, FloatProperty, CollectionProperty
 from mathutils import Vector, Matrix
 import xml.etree.ElementTree as ET
 
@@ -1014,72 +1014,54 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
         name="Merge Distance",
         default=0.0001, min=0.0, max=0.1, precision=5,
     )
+    
+    files: CollectionProperty(
+        type=bpy.types.OperatorFileListElement,
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
+
+    directory: StringProperty(
+        subtype='DIR_PATH',
+    )
 
     def execute(self, context):
-        self._prescan()
+        for i in self.files:
+            filepath = os.path.join(self.directory, i.name)
 
-        if not os.path.isfile(self.filepath):
-            self.report({'ERROR'}, f"File not found: {self.filepath}")
-            return {'CANCELLED'}
+            self._prescan(filepath)
 
-        # Reuse the tree already parsed by _prescan if available (avoids double parse)
-        if hasattr(self, '_cached_root') and self._cached_root is not None:
-            root = self._cached_root
-            self._cached_root = None  # clear cache after use
-        else:
-            try:
-                tree = ET.parse(self.filepath)
-                root = tree.getroot()
-            except ET.ParseError as e:
-                try:
-                    import re
-                    with open(self.filepath, 'r', encoding='utf-8', errors='replace') as f:
-                        raw = f.read()
-                    raw = re.sub(r'<\w+:\w+[^>]*/>', '', raw)
-                    raw = re.sub(r'<(\w+:\w+)[^>]*>.*?</\1>', '', raw, flags=re.DOTALL)
-                    raw = re.sub(r'<(\w+):(\w+)', r'<\2', raw)
-                    raw = re.sub(r'</(\w+):(\w+)', r'</\2', raw)
-                    raw = re.sub(r'\s+\w+:\w+\s*=\s*"[^"]*"', '', raw)
-                    raw = re.sub(r"\s+\w+:\w+\s*=\s*'[^']*'", '', raw)
-                    root = ET.fromstring(raw)
-                except Exception as e2:
-                    self.report({'ERROR'}, f"Failed to parse DAE: {e} / {e2}")
-                    return {'CANCELLED'}
-            except Exception as e:
-                self.report({'ERROR'}, f"Failed to parse DAE: {e}")
+            if not os.path.isfile(filepath):
+                self.report({'ERROR'}, f"File not found: {filepath}")
                 return {'CANCELLED'}
 
-        ns  = get_collada_ns(root)
-        dae = self.filepath
+            print(f"[DAE] Parsing \'{filepath}\'")
 
-        if context.view_layer.active_layer_collection:
-            collection = context.view_layer.active_layer_collection.collection
-        else:
-            collection = context.scene.collection
-
-        profile        = analyse_dae(root, ns)
-        is_rigged      = profile["is_rigged"]
-        is_assembly    = profile["is_assembly"]
-        correction_mat = get_up_axis_matrix(root, ns)
-
-        material_texture_map = extract_material_texture_map(root, ns) if self.import_materials else {}
-        model_name           = os.path.splitext(os.path.basename(dae))[0]
-
-        arm_obj     = None
-        controllers = {}
-        if self.import_rig and is_rigged:
-            arm_obj     = build_armature(root, ns, collection, model_name, correction_mat)
-            controllers = parse_controllers(root, ns)
-        elif self.import_rig and not is_rigged:
-            print("[DAE] No rig found — skipping armature import.")
-
-        geom_mat_override = build_ctrl_mat_map(root, ns, controllers)
-
-        # Build fast geometry lookup by id
-        geom_map = {g.attrib.get("id"): g for g in root.findall(f".//{q(ns,'geometry')}")}
-        if not geom_map:
-            self.report({'ERROR'}, "No <geometry> found in DAE")
-            return {'CANCELLED'}
+            # Reuse the tree already parsed by _prescan if available (avoids double parse)
+            if hasattr(self, '_cached_root') and self._cached_root is not None:
+                root = self._cached_root
+                self._cached_root = None  # clear cache after use
+            else:
+                try:
+                    tree = ET.parse(filepath)
+                    root = tree.getroot()
+                except ET.ParseError as e:
+                    try:
+                        import re
+                        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
+                            raw = f.read()
+                        raw = re.sub(r'<\w+:\w+[^>]*/>', '', raw)
+                        raw = re.sub(r'<(\w+:\w+)[^>]*>.*?</\1>', '', raw, flags=re.DOTALL)
+                        raw = re.sub(r'<(\w+):(\w+)', r'<\2', raw)
+                        raw = re.sub(r'</(\w+):(\w+)', r'</\2', raw)
+                        raw = re.sub(r'\s+\w+:\w+\s*=\s*"[^"]*"', '', raw)
+                        raw = re.sub(r"\s+\w+:\w+\s*=\s*'[^']*'", '', raw)
+                        root = ET.fromstring(raw)
+                    except Exception as e2:
+                        self.report({'ERROR'}, f"Failed to parse DAE: {e} / {e2}")
+                        return {'CANCELLED'}
+                except Exception as e:
+                    self.report({'ERROR'}, f"Failed to parse DAE: {e}")
+                    return {'CANCELLED'}
 
         imported = 0
         imported_geom_ids = set()   # guard: never import same geometry twice
@@ -1150,39 +1132,118 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
             for child in node.findall(q(ns, "node")):
                 walk_scene(child, world_mat)
 
-        vs = root.find(f".//{q(ns,'visual_scene')}")
-        if vs is None:
-            self.report({'ERROR'}, "No <visual_scene> found in DAE")
-            return {'CANCELLED'}
+            if context.view_layer.active_layer_collection:
+                collection = context.view_layer.active_layer_collection.collection
+            else:
+                collection = context.scene.collection
 
-        # Apply correction_mat at the root so the whole scene rotates into
-        # Blender Z-up space as object-level transforms (not baked into vertices)
-        for node in vs.findall(q(ns, "node")):
-            walk_scene(node, correction_mat)
+            profile        = analyse_dae(root, ns)
+            is_rigged      = profile["is_rigged"]
+            is_assembly    = profile["is_assembly"]
+            correction_mat = get_up_axis_matrix(root, ns)
 
-        if imported == 0:
-            self.report({'ERROR'}, "No objects created. Check console.")
-            return {'CANCELLED'}
+            material_texture_map = extract_material_texture_map(root, ns) if self.import_materials else {}
+            model_name           = os.path.splitext(os.path.basename(dae))[0]
 
-        rig_msg = f" + armature ({arm_obj.name})" if arm_obj else ""
-        self.report({'INFO'}, f"Imported {imported} object(s){rig_msg}.")
+            arm_obj     = None
+            controllers = {}
+            if self.import_rig and is_rigged:
+                arm_obj     = build_armature(root, ns, collection, model_name, correction_mat)
+                controllers = parse_controllers(root, ns)
+            elif self.import_rig and not is_rigged:
+                print("[DAE] No rig found — skipping armature import.")
+
+            geom_mat_override = build_ctrl_mat_map(root, ns, controllers)
+
+            # Build fast geometry lookup by id
+            geom_map = {g.attrib.get("id"): g for g in root.findall(f".//{q(ns,'geometry')}")}
+            if not geom_map:
+                self.report({'ERROR'}, "No <geometry> found in DAE")
+                return {'CANCELLED'}
+
+            imported = 0
+            imported_geom_ids = set()   # guard: never import same geometry twice
+
+            def walk_scene(node, parent_mat):
+                """
+                Recursively walk the visual scene, accumulating transforms.
+                Uses parse_node_transform so <translate>/<rotate>/<scale> nodes
+                are handled correctly, not just <matrix>.
+                correction_mat is applied at the root level so the whole scene
+                is rotated into Blender's Z-up space as object transforms,
+                rather than baking the rotation into every vertex.
+                """
+                nonlocal imported
+                local_mat = parse_node_transform(node, ns)
+                world_mat = parent_mat @ local_mat
+
+                # Instance geometry in this node
+                for ig in node.findall(q(ns, "instance_geometry")):
+                    geom_url_val = ig.attrib.get("url", "")
+                    geom_id = geom_url_val[1:] if geom_url_val.startswith("#") else geom_url_val
+                    if geom_id in geom_map and geom_id not in imported_geom_ids:
+                        imported_geom_ids.add(geom_id)
+                        mat_override = geom_mat_override.get(geom_id, {})
+                        obj = build_mesh_from_geometry(
+                            geom_map[geom_id], ns, collection, material_texture_map,
+                            arm_obj, controllers, mat_override, dae,
+                            import_uvs=self.import_uvs,
+                            import_normals=self.import_normals,
+                            import_vertex_colors=self.import_vertex_colors,
+                            merge_vertices=self.merge_vertices,
+                            merge_threshold=self.merge_threshold,
+                        )
+                        if obj:
+                            obj.matrix_world = world_mat
+                            imported += 1
+
+                # Instance node (library_nodes assembly)
+                for inn in node.findall(q(ns, "instance_node")):
+                    nid_val = inn.attrib.get("url", "")
+                    nid = nid_val.lstrip("#")
+                    lib = root.find(q(ns, "library_nodes"))
+                    if lib is not None:
+                        tgt = lib.find(f".//{q(ns,'node')}[@id='{nid}']")
+                        if tgt is not None:
+                            walk_scene(tgt, world_mat)
+
+                # Recurse into children
+                for child in node.findall(q(ns, "node")):
+                    walk_scene(child, world_mat)
+
+            vs = root.find(f".//{q(ns,'visual_scene')}")
+            if vs is None:
+                self.report({'ERROR'}, "No <visual_scene> found in DAE")
+                return {'CANCELLED'}
+
+            # Apply correction_mat at the root so the whole scene rotates into
+            # Blender Z-up space as object-level transforms (not baked into vertices)
+            for node in vs.findall(q(ns, "node")):
+                walk_scene(node, correction_mat)
+
+            if imported == 0:
+                self.report({'ERROR'}, "No objects created. Check console.")
+                return {'CANCELLED'}
+
+            rig_msg = f" + armature ({arm_obj.name})" if arm_obj else ""
+            self.report({'INFO'}, f"Imported {imported} object(s){rig_msg}.")
         return {'FINISHED'}
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
-    def _prescan(self):
-        if not self.filepath or not os.path.isfile(self.filepath):
+    def _prescan(self, filepath):
+        if not filepath or not os.path.isfile(filepath):
             return
         try:
             import re as _re
             try:
-                _tree = ET.parse(self.filepath)
+                _tree = ET.parse(filepath)
                 _root = _tree.getroot()
                 self._cached_root = _root   # cache so execute() doesn't re-parse
             except ET.ParseError:
-                with open(self.filepath, 'r', encoding='utf-8', errors='replace') as f:
+                with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
                     _raw = f.read()
                 _raw = _re.sub(r'<(\w+:\w+)[^>]*>.*?</\1>', '', _raw, flags=_re.DOTALL)
                 _raw = _re.sub(r'<(\w+):(\w+)', r'<\2', _raw)

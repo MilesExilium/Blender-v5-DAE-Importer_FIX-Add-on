@@ -1,7 +1,7 @@
 # Blender-v5-DAE-Importer-Add-on
 A lightweight Blender 5 add-on that restores support for importing .dae (COLLADA) files after the official importer was removed in version 5.
 
-(Originally created by /u/varyingopinions on Reddit, ekztal on GitHub. Extended and reworked by MilesExilium and RebeccaNod1.)
+(Originally created by /u/varyingopinions on Reddit, ekztal on GitHub. Extended and reworked by MilesExilium, RebeccaNod1, and Zack Wilde.)
 
 ## Installation:
 
@@ -16,7 +16,7 @@ Enable Simple COLLADA (.dae)
 Import via File → Import → Simple COLLADA (.dae)
 
 
-## What's New (v1.0.0):
+## What's New (v1.0.1):
 
 The original add-on imported geometry with basic material name assignment but no textures, no rig, and no skin weights. The following has been added:
 
@@ -37,7 +37,9 @@ The original add-on imported geometry with basic material name assignment but no
 + **Bone name matching** — Some exporters prefix joint node IDs with a model name while the skin controller references bones by their short name only. The importer now resolves this mismatch automatically across multiple naming conventions.
   
 + **Import options panel** — The file browser now includes a proper options panel: toggle UVs, normals, vertex colors, and materials independently.
-  
+
++ **Multiple file importing** - The importer can now load multiple files at a time, if you select more than 1 file in the file browser
+
 + **Merge Vertices** — Optional post-import pass to remove duplicate vertices by distance, useful for models with split seams along UV borders.
 
 + **Universal joint name resolution** — Added a four-strategy lookup (exact ID, exact name, space-to-underscore normalisation, and suffix matching) so rigs from any exporter bind correctly without manual edits to the DAE file.
