@@ -1063,8 +1063,74 @@ class IMPORT_OT_simple_collada_full(Operator, ImportHelper):
                     self.report({'ERROR'}, f"Failed to parse DAE: {e}")
                     return {'CANCELLED'}
 
-            ns  = get_collada_ns(root)
-            dae = filepath
+        imported = 0
+        imported_geom_ids = set()   # guard: never import same geometry twice
+
+        def walk_scene(node, parent_mat):
+            """
+            Recursively walk the visual scene, accumulating transforms.
+            Uses parse_node_transform so <translate>/<rotate>/<scale> nodes
+            are handled correctly, not just <matrix>.
+            correction_mat is applied at the root level so the whole scene
+            is rotated into Blender's Z-up space as object transforms,
+            rather than baking the rotation into every vertex.
+            """
+            nonlocal imported
+            local_mat = parse_node_transform(node, ns)
+            world_mat = parent_mat @ local_mat
+
+            # Instance geometry in this node
+            for ig in node.findall(q(ns, "instance_geometry")):
+                geom_url_val = ig.attrib.get("url", "")
+                geom_id = geom_url_val[1:] if geom_url_val.startswith("#") else geom_url_val
+                if geom_id in geom_map and geom_id not in imported_geom_ids:
+                    imported_geom_ids.add(geom_id)
+                    mat_override = geom_mat_override.get(geom_id, {})
+                    obj = build_mesh_from_geometry(
+                        geom_map[geom_id], ns, collection, material_texture_map,
+                        arm_obj, controllers, mat_override, dae,
+                        import_uvs=self.import_uvs,
+                        import_normals=self.import_normals,
+                        import_vertex_colors=self.import_vertex_colors,
+                        merge_vertices=self.merge_vertices,
+                        merge_threshold=self.merge_threshold,
+                    )
+                    if obj:
+                        obj.matrix_world = world_mat
+                        imported += 1
+            for ic in node.findall(q(ns, "instance_controller")):
+                ctrl_url_val = ic.attrib.get("url", "")
+                ctrl_url = ctrl_url_val.lstrip("#")
+                if ctrl_url in controllers:
+                    geom_id = controllers[ctrl_url]["skin_source"]
+                    if geom_id in geom_map and geom_id not in imported_geom_ids:
+                        imported_geom_ids.add(geom_id)
+                        mat_override = geom_mat_override.get(geom_id, {})
+                        obj = build_mesh_from_geometry(
+                            geom_map[geom_id], ns, collection, material_texture_map,
+                            arm_obj, controllers, mat_override, dae,
+                            import_uvs=self.import_uvs,
+                            import_normals=self.import_normals,
+                            import_vertex_colors=self.import_vertex_colors,
+                            merge_vertices=self.merge_vertices,
+                            merge_threshold=self.merge_threshold,
+                        )
+                        if obj:
+                            obj.matrix_world = local_mat
+                            imported += 1
+            # Instance node (library_nodes assembly)
+            for inn in node.findall(q(ns, "instance_node")):
+                nid_val = inn.attrib.get("url", "")
+                nid = nid_val.lstrip("#")
+                lib = root.find(q(ns, "library_nodes"))
+                if lib is not None:
+                    tgt = lib.find(f".//{q(ns,'node')}[@id='{nid}']")
+                    if tgt is not None:
+                        walk_scene(tgt, world_mat)
+
+            # Recurse into children
+            for child in node.findall(q(ns, "node")):
+                walk_scene(child, world_mat)
 
             if context.view_layer.active_layer_collection:
                 collection = context.view_layer.active_layer_collection.collection
