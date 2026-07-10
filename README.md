@@ -1,72 +1,137 @@
-# Blender-v5-DAE-Importer-Add-on
-A lightweight Blender 5 add-on that restores support for importing .dae (COLLADA) files after the official importer was removed in version 5.
+# Blender v5 DAE / COLLADA Importer & Exporter
 
-(Originally created by /u/varyingopinions on Reddit, ekztal on GitHub. Extended and reworked by MilesExilium, RebeccaNod1, and Zack Wilde.)
+A Blender 5-compatible add-on that restores practical `.dae` / COLLADA import and export support after Blender removed the old native COLLADA tools.
 
-## Installation:
+Originally created by `/u/varyingopinions` on Reddit and `ekztal` on GitHub. Extended and reworked by the community for newer Blender versions.
 
-Download simple_collada_importer.py
+## Download
 
-Blender → Edit → Preferences → Add-ons
+Use this file:
 
-Click Install… → select the .py file
+`DAE_Importer_Exporter_Ver42.py`
 
-Enable Simple COLLADA (.dae)
+Do not use the older `DAE_Importer_Ver34.py` or `DAE_Importer_Ver35.py` files unless you specifically need the old importer-only version.
 
-Import via File → Import → Simple COLLADA (.dae)
+## Installation
 
+1. Download `DAE_Importer_Exporter_Ver42.py`.
+2. Open Blender.
+3. Go to `Edit > Preferences > Add-ons`.
+4. Click `Install...`.
+5. Select `DAE_Importer_Exporter_Ver42.py`.
+6. Enable the add-on.
 
-## What's New (v1.0.1):
+Import:
 
-The original add-on imported geometry with basic material name assignment but no textures, no rig, and no skin weights. The following has been added:
+`File > Import > DAE / COLLADA`
 
-+ **Texture loading**  — Automatically loads image files from the same folder as the .dae and builds a Principled BSDF node graph with albedo, AO, and normal map channels wired correctly.
+Export:
 
-+ **Polylist support** — The original only handled <triangles>. Many game model exporters use <polylist> instead; both are now supported with automatic fan-triangulation.
+`File > Export > DAE / COLLADA`
 
-+ **Armature import** — Optionally imports the full bone hierarchy as a Blender armature, with correct world-space positioning. Toggle via the Import Rig checkbox in the file browser.
+## Features
 
-+ **Skin weights** — Vertex groups and an Armature modifier are created automatically, with the bind shape matrix baked in so the mesh aligns with the rig on import.
+- Import and export `.dae` / COLLADA files
+- Mesh geometry import/export
+- Materials and texture references
+- Multiple UV maps
+- Vertex colors
+- Custom normals
+- Object hierarchy and transforms
+- Unit and axis conversion
+- Cameras and lights
+- Armatures, bones, skin controllers, and vertex weights
+- Shape keys / morph controller support
+- Object and bone animation support
+- Batch import of multiple DAE files
+- Optional collection creation per imported file
+- Safer batch import error handling, so one broken file does not stop the whole batch
+- Support for common game/exporter primitive types, including `triangles`, `polylist`, `polygons`, `tristrips`, and `trifans`
+- Fallback geometry import for DAE files with no visual scene
+- Faster large mesh import using Blender bulk data APIs
 
-+ **Coordinate space fix** — Replaced the hardcoded 90° rotation with proper per-file handling so models land right-side up regardless of the source exporter.
+## What changed in v4.2.2
 
-+ **Normal map compatibility** — Supports both FCOLLADA (Blender) and OpenCOLLADA3dsMax (3ds Max) exporter conventions for normal map channel detection.
+This version expands the original importer into a fuller importer/exporter with stronger compatibility for Blender 5, Blender 4.5-style COLLADA files, game-exported DAE files, and 3ds Max round-trip workflows.
 
-+ **Bad diffuse correction** — If an exporter accidentally assigned an AO or specular map to the diffuse channel, the importer automatically substitutes the correct albedo file if one is found nearby.
+Main fixes include:
 
-+ **Bone name matching** — Some exporters prefix joint node IDs with a model name while the skin controller references bones by their short name only. The importer now resolves this mismatch automatically across multiple naming conventions.
-  
-+ **Import options panel** — The file browser now includes a proper options panel: toggle UVs, normals, vertex colors, and materials independently.
+- Fixed add-on registration issues
+- Fixed missing or broken `bl_info` metadata problems
+- Added DAE export support
+- Added multi-file batch import
+- Added multiple UV map support
+- Improved transform, unit, and axis handling
+- Improved armature, bone, skin-weight, and bind-pose handling
+- Added shape key / morph controller import and export
+- Added animation import/export support
+- Added camera and light support
+- Added fallback handling for files that contain geometry but no visual scene
+- Added support for triangle strips and triangle fans
+- Improved texture path handling, including Windows-style paths exported by 3ds Max
+- Improved performance on large meshes
+- Improved error reporting for partial or malformed DAE files
+- Changed imported armatures to use a less intrusive stick display by default, so long helper/root bones do not visually cover game characters on first import
+- Fixed Blender 2.7x / BOTW-style zero-translation bind-shape matrices that could transpose incorrectly and split upper-body meshes away from the rest of the character
 
-+ **Multiple file importing** - The importer can now load multiple files at a time, if you select more than 1 file in the file browser
+## Contributors
 
-+ **Merge Vertices** — Optional post-import pass to remove duplicate vertices by distance, useful for models with split seams along UV borders.
+- `/u/varyingopinions` / `ekztal` - original Simple COLLADA importer foundation
+- MilesExilium - extended and maintained the Blender 5 importer fork
+- RebeccaNod1 - importer fixes and compatibility work
+- Zack Wilde / `ZackWilde27` - multi-file import contribution in the earlier importer fork
+- XDM-Inc
 
-+ **Universal joint name resolution** — Added a four-strategy lookup (exact ID, exact name, space-to-underscore normalisation, and suffix matching) so rigs from any exporter bind correctly without manual edits to the DAE file.
-  
-+ **Unskinned mesh handling** — Meshes with no skin weights (rigid accessories, hair stubs with empty controllers) are now automatically parented to the armature object so they move with the rig.
-  
-+ **Placeholder bone filtering** — Exporters that write NotABone placeholder entries in skin controllers no longer corrupt vertex group assignments. Placeholders are silently skipped while real bone weights are applied correctly.
-  
-+ **Vertices-block normal/UV support** — Some exporters (notably Wii-era models) declare normals and UVs inside the <vertices> block rather than as separate primitive inputs. These are now read correctly, fixing flat shading on affected models.
-  
-+ **Missing up-axis handling** — DAE files with no <up_axis> tag now default to Z-up instead of incorrectly applying a 90° rotation.
+## Compatibility
 
-+ **Texture search improvement** — The importer now searches parent directories and subdirectories when textures aren't found directly next to the DAE, handling nested folder structures automatically.
-  
-+ **Material rebuild fix** — Materials with no texture nodes are now always rebuilt rather than reused as grey placeholders.
-  
-+ **Bad diffuse correction expanded** — Extended to catch more exporter-specific misassignments including specular and bump maps placed in the diffuse slot.
+Tested with:
 
-+ **Visual Scene Support** — Full assembly of multi-part scenes. Preserves relative positions, rotations, and scales of all objects (Translation, Rotation, Scale tags supported).
+- Blender 5
+- Blender 4.5 native COLLADA compatibility checks
+- Autodesk 3ds Max 2024 COLLADA import/export smoke test
 
-+ **Second Life / Firestorm Hardening** — Advanced ID scavenging to fix "Missing POSITION source" errors common in SL/Firestorm exports. Automatically handles non-standard ID prefixes for robust geometry recovery.
+Validated areas include:
 
-+ **Blender 5.1.0 Ready** — Updated metadata and syntax for the modern V5 extension system.
+- Add-on registration
+- Mesh import/export
+- Materials and textures
+- Multiple UV maps
+- Cameras and lights
+- Armatures and skin weights
+- Shape keys / morph animation
+- Batch import
+- Large mesh import performance
+- Blender-to-3ds-Max-to-Blender DAE round trip
 
+## Known limitations
 
-### Notes
+COLLADA is a broad format and different tools export it in different ways. This add-on handles many common Blender, 3ds Max, and game-exporter patterns, but unusual vendor-specific DAE files may still need sample-based fixes.
 
-+ Tested on Blender 5.1.0 (Flatpak & Local)
-+ Skin weights require the mesh and armature to be exported together in the same .dae file
-+ Normal maps on models with multiple UV channels may need to be connected manually in the shader editor
+Autodesk 3ds Max 2024 did not preserve standard COLLADA morph targets during the tested Max round trip. Skin, UVs, hierarchy, cameras, lights, and mesh data were preserved, but Max did not recreate a Morpher modifier from the COLLADA morph controller.
+
+If you find a DAE file that fails, please open an issue and include:
+
+- The `.dae` file, if possible
+- Blender version
+- Exporting tool, if known
+- Console error output
+- Whether the issue happens on import, export, or round trip
+
+## Issue categories addressed
+
+This release addresses the main reported problem areas:
+
+- Add-on not showing in Blender
+- Missing commas or invalid add-on metadata
+- Missing multi-UV import
+- Incorrect scale, object position, or object center behavior
+- Rig not importing
+- Files importing only the armature without the mesh
+- Slow imports on larger files
+- No multi-file import support
+- Game-style DAE primitive handling
+- Generic or unclear import errors
+
+## License
+
+Use the same license terms as the original project unless the repository owner updates the license.
