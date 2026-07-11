@@ -8,17 +8,15 @@ Originally created by `/u/varyingopinions` on Reddit and `ekztal` on GitHub. Ext
 
 Use this file:
 
-`DAE_Importer_Exporter_Ver42.py`
-
-Do not use the older `DAE_Importer_Ver34.py` or `DAE_Importer_Ver35.py` files unless you specifically need the old importer-only version.
+`simple_collada_importer.py`
 
 ## Installation
 
-1. Download `DAE_Importer_Exporter_Ver42.py`.
+1. Download `simple_collada_importer.py`.
 2. Open Blender.
 3. Go to `Edit > Preferences > Add-ons`.
 4. Click `Install...`.
-5. Select `DAE_Importer_Exporter_Ver42.py`.
+5. Select `simple_collada_importer.py`.
 6. Enable the add-on.
 
 Import:
